@@ -1,0 +1,1 @@
+- [Supabase wiring](supabase-wiring.md) — LAWMIND uses real Supabase; VITE_ secrets must be injected via vite.config.ts define block

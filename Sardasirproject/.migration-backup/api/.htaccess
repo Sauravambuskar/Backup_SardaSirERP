@@ -1,0 +1,24 @@
+# API routing — clean URLs for /api/*
+RewriteEngine On
+
+# Pass Authorization header through to PHP (Hostinger Apache often strips it)
+RewriteCond %{HTTP:Authorization} ^(.+)$
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%1]
+
+# /api/auth/signup     → /api/auth/signup.php
+# /api/auth/login      → /api/auth/login.php
+# /api/auth/logout     → /api/auth/logout.php
+# /api/auth/me         → /api/auth/me.php
+RewriteRule ^auth/(signup|login|logout|me)$ auth/$1.php [L]
+
+# /api/crud/<table>    → /api/crud.php?table=<table>
+RewriteRule ^crud/([a-zA-Z_]+)$ crud.php?table=$1 [L,QSA]
+
+# /api/rpc/<fn>        → /api/rpc.php?fn=<fn>
+RewriteRule ^rpc/([a-zA-Z_]+)$ rpc.php?fn=$1 [L,QSA]
+
+# /api/storage         → /api/storage.php
+RewriteRule ^storage$ storage.php [L,QSA]
+
+# Disable directory listing
+Options -Indexes
