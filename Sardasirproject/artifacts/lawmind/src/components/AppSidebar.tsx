@@ -67,6 +67,7 @@ const navSections = [
           { label: "Templates", path: "/setup/templates" },
           { label: "Audit Logs", path: "/setup/logs" },
           { label: "AI Settings", path: "/setup/ai-settings" },
+          { label: "AI Modules", path: "/setup/ai-modules" },
           { label: "Email Settings", path: "/setup/email" },
         ],
       },
