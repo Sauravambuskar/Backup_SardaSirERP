@@ -120,7 +120,12 @@ export default function AIAgentPage() {
 
       const history: AIMessage[] = [
         { role: "system", content: systemContent },
-        ...messages.slice(-10).map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+        // Keep only last 4 exchanges (8 messages) to stay under token limits
+        ...messages.slice(-8).map((m) => ({
+          role: m.role as "user" | "assistant",
+          // Truncate long assistant messages (e.g. big tables) in history
+          content: m.content.length > 800 ? m.content.slice(0, 800) + "...[truncated]" : m.content,
+        })),
         { role: "user" as const, content: msg },
       ];
 
