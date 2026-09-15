@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "LAWMIND"
+version = "1.0.0"
+id = "artifacts/lawmind"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22738
+
+[services.development]
+run = "pnpm --filter @workspace/lawmind run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/lawmind", "run", "build" ]
+publicDir = "artifacts/lawmind/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22738"
+BASE_PATH = "/"
