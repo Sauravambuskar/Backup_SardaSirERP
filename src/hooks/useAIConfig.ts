@@ -4,11 +4,25 @@ import { supabase } from '@/integrations/supabase/client';
 import type { AIProvider } from '@/lib/ai-providers';
 import {
   getAllKeysForProvider,
-  fetchExtraKeys,
+  fetchAllStoreData,
   addExtraKey,
   removeExtraKey,
   getCachedKeys,
+  getCachedGroups,
+  getCachedModules,
+  getGroupById,
+  getKeysFromGroup,
+  createApiGroup,
+  updateApiGroup,
+  deleteApiGroup,
+  addKeyToGroup,
+  removeKeyFromGroup,
+  createAIModule,
+  updateAIModule,
+  deleteAIModule,
   type ExtraKeysMap,
+  type ApiGroup,
+  type AIModule,
 } from '@/lib/multiKeyStore';
 
 export interface ProviderEntry {
@@ -21,38 +35,36 @@ export interface ProviderEntry {
 export interface AIConfig {
   providers: Record<AIProvider, ProviderEntry>;
   activeProvider: AIProvider;
+  /** ID of the active AI Module (undefined = default / no module). */
+  activeModuleId?: string;
 }
 
 const DEFAULT_CONFIG: AIConfig = {
   providers: {
-    groq: { apiKey: '', model: 'groq/compound', enabled: false },
-    openai: { apiKey: '', model: 'gpt-4o-mini', enabled: false },
-    gemini: { apiKey: '', model: 'gemini-2.0-flash', enabled: false },
-    openrouter: { apiKey: '', model: 'meta-llama/llama-3.3-70b-instruct:free', enabled: false },
-    custom: { apiKey: '', model: '', baseUrl: '', enabled: false },
+    groq:       { apiKey: '', model: 'groq/compound',                              enabled: false },
+    openai:     { apiKey: '', model: 'gpt-4o-mini',                                enabled: false },
+    gemini:     { apiKey: '', model: 'gemini-2.0-flash',                           enabled: false },
+    openrouter: { apiKey: '', model: 'meta-llama/llama-3.3-70b-instruct:free',    enabled: false },
+    custom:     { apiKey: '', model: '', baseUrl: '',                              enabled: false },
   },
   activeProvider: 'groq',
 };
 
-/**
- * Loads AI config from Supabase `ai_config` table.
- * Super Admin / Admin can write; all authenticated users can read.
- */
-export function useAIConfig() {
-  const [config, setConfig] = useState<AIConfig>(DEFAULT_CONFIG);
-  const [extraKeys, setExtraKeys] = useState<ExtraKeysMap>(getCachedKeys);
-  const [loading, setLoading] = useState(true);
+// ─────────────────────────────────────────────────────────────────────────────
 
-  // Guard: skip realtime reloads while we are saving
-  const isSavingRef = useRef(false);
-  // Debounce timer per provider
-  const saveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  // Accumulate pending DB updates per provider so nothing gets lost
+export function useAIConfig() {
+  const [config, setConfig]       = useState<AIConfig>(DEFAULT_CONFIG);
+  const [extraKeys, setExtraKeys] = useState<ExtraKeysMap>(getCachedKeys);
+  const [groups,    setGroups]    = useState<ApiGroup[]>(getCachedGroups);
+  const [modules,   setModules]   = useState<AIModule[]>(getCachedModules);
+  const [loading,   setLoading]   = useState(true);
+
+  const isSavingRef      = useRef(false);
+  const saveTimersRef    = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const pendingUpdatesRef = useRef<Record<string, Record<string, unknown>>>({});
 
-  // ── Fetch config from Supabase ──
+  // ── Fetch from Supabase ────────────────────────────────────────────────────
   const loadConfig = useCallback(async () => {
-    // Don't overwrite local state while a save is in progress
     if (isSavingRef.current) return;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -62,7 +74,7 @@ export function useAIConfig() {
       .order('provider');
 
     if (error || !data) {
-      console.warn('[useAIConfig] Could not load from Supabase, using defaults', error?.message);
+      console.warn('[useAIConfig] Could not load from Supabase', error?.message);
       setLoading(false);
       return;
     }
@@ -76,22 +88,23 @@ export function useAIConfig() {
         const apiKey = String(row.api_key || '');
         providers[p] = {
           apiKey,
-          model: String(row.model || ''),
+          model:   String(row.model    || ''),
           baseUrl: String(row.base_url || ''),
           enabled: apiKey.length > 0,
         };
       }
-      if (row.is_active) activeProvider = p;
+      if (row.is_active) activeProvider = p as AIProvider;
     }
 
-    setConfig({ providers, activeProvider });
+    setConfig((prev) => ({ ...prev, providers, activeProvider }));
 
-    // The spare keys live in app_settings, shared across every user and device.
-    // Loading them here keeps getAllConfigs() synchronous on the request path.
     try {
-      setExtraKeys(await fetchExtraKeys());
+      const { extraKeys: ek, groups: g, modules: m } = await fetchAllStoreData();
+      setExtraKeys(ek);
+      setGroups(g);
+      setModules(m);
     } catch (err) {
-      console.warn('[useAIConfig] Could not load failover keys', err);
+      console.warn('[useAIConfig] Could not load store data', err);
     }
 
     setLoading(false);
@@ -100,179 +113,232 @@ export function useAIConfig() {
   useEffect(() => {
     loadConfig();
 
-    // Real-time subscription — fires for OTHER users' changes
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const channel = (supabase as any)
       .channel('ai_config_changes')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'ai_config' },
-        () => {
-          if (!isSavingRef.current) {
-            loadConfig();
-          }
-        },
-      )
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ai_config' }, () => {
+        if (!isSavingRef.current) loadConfig();
+      })
       .subscribe();
 
-    return () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (supabase as any).removeChannel(channel);
-    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return () => { (supabase as any).removeChannel(channel); };
   }, [loadConfig]);
 
-  // ── Flush a single provider's accumulated updates to DB ──
+  // ── Flush pending DB writes ────────────────────────────────────────────────
   const flushProvider = useCallback(async (provider: AIProvider) => {
     const pending = pendingUpdatesRef.current[provider];
     if (!pending || Object.keys(pending).length === 0) return;
-
-    // Copy and clear the pending set
     const dbUpdates = { ...pending, updated_at: new Date().toISOString() };
     pendingUpdatesRef.current[provider] = {};
-
     isSavingRef.current = true;
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { error } = await (supabase as any)
-      .from('ai_config')
-      .update(dbUpdates)
-      .eq('provider', provider);
-
-    if (error) {
-      console.error('[useAIConfig] Failed to save:', error.message);
-      toast.error(`Failed to save AI config: ${error.message}`);
-    }
-
-    // Keep the guard up for a short window so the realtime event passes
+      .from('ai_config').update(dbUpdates).eq('provider', provider);
+    if (error) toast.error(`Failed to save AI config: ${error.message}`);
     setTimeout(() => { isSavingRef.current = false; }, 2000);
   }, []);
 
-  // ── Update a single provider field (debounced, accumulated) ──
-  const updateProvider = useCallback(
-    (provider: AIProvider, updates: Partial<ProviderEntry>) => {
-      // 1. Instant local state update for responsive UI
-      setConfig((prev) => ({
-        ...prev,
-        providers: {
-          ...prev.providers,
-          [provider]: { ...prev.providers[provider], ...updates },
-        },
-      }));
+  const updateProvider = useCallback((provider: AIProvider, updates: Partial<ProviderEntry>) => {
+    setConfig((prev) => ({
+      ...prev,
+      providers: { ...prev.providers, [provider]: { ...prev.providers[provider], ...updates } },
+    }));
+    isSavingRef.current = true;
+    if (!pendingUpdatesRef.current[provider]) pendingUpdatesRef.current[provider] = {};
+    const pending = pendingUpdatesRef.current[provider];
+    if (updates.apiKey  !== undefined) pending.api_key  = updates.apiKey;
+    if (updates.model   !== undefined) pending.model    = updates.model;
+    if (updates.baseUrl !== undefined) pending.base_url = updates.baseUrl;
+    if (saveTimersRef.current[provider]) clearTimeout(saveTimersRef.current[provider]);
+    saveTimersRef.current[provider] = setTimeout(() => flushProvider(provider), 1000);
+  }, [flushProvider]);
 
-      // 2. Block realtime reloads
-      isSavingRef.current = true;
-
-      // 3. Accumulate updates (merge with any pending ones)
-      if (!pendingUpdatesRef.current[provider]) {
-        pendingUpdatesRef.current[provider] = {};
-      }
-      const pending = pendingUpdatesRef.current[provider];
-      if (updates.apiKey !== undefined) pending.api_key = updates.apiKey;
-      if (updates.model !== undefined) pending.model = updates.model;
-      if (updates.baseUrl !== undefined) pending.base_url = updates.baseUrl;
-
-      // 4. Debounce: reset timer for this provider
-      if (saveTimersRef.current[provider]) {
-        clearTimeout(saveTimersRef.current[provider]);
-      }
-      saveTimersRef.current[provider] = setTimeout(() => {
-        flushProvider(provider);
-      }, 1000);
-    },
-    [flushProvider],
-  );
-
-  // ── Set one provider as active, deactivate others ──
   const setActiveProvider = useCallback(async (provider: AIProvider) => {
     setConfig((prev) => ({ ...prev, activeProvider: provider }));
     isSavingRef.current = true;
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rawClient = supabase as any;
-    await rawClient
-      .from('ai_config')
-      .update({ is_active: false, updated_at: new Date().toISOString() })
-      .neq('provider', '__none__');
-
-    await rawClient
-      .from('ai_config')
-      .update({ is_active: true, updated_at: new Date().toISOString() })
-      .eq('provider', provider);
-
+    const raw = supabase as any;
+    await raw.from('ai_config').update({ is_active: false, updated_at: new Date().toISOString() }).neq('provider', '__none__');
+    await raw.from('ai_config').update({ is_active: true,  updated_at: new Date().toISOString() }).eq('provider', provider);
     setTimeout(() => { isSavingRef.current = false; }, 2000);
   }, []);
 
-  // ── Build the provider config object needed by ai-providers.ts ──
-  const getActiveConfig = useCallback(() => {
-    const entry = config.providers[config.activeProvider];
-    return {
-      provider: config.activeProvider,
-      apiKey: entry.apiKey,
-      model: entry.model,
-      baseUrl: entry.baseUrl,
-      name: config.activeProvider,
-    };
-  }, [config]);
+  // ── Active Module switching ────────────────────────────────────────────────
+  const setActiveModule = useCallback((moduleId: string | undefined) => {
+    setConfig((prev) => ({ ...prev, activeModuleId: moduleId }));
+  }, []);
 
+  // ── Failover chain builder ────────────────────────────────────────────────
   /**
-   * Get ALL configured providers in priority order (active first, then others).
-   * Includes extra keys from multi-key store for failover.
+   * Build the ordered list of configs the failover engine will walk.
+   * Priority (top = first tried):
+   *   1. Active module's group keys (if module + group configured)
+   *   2. Active provider primary key + its extra-key pool
+   *   3. Module's fallback provider keys (if configured)
+   *   4. Every other enabled provider (their key pools), in configured order
    */
   const getAllConfigs = useCallback(() => {
-    const configs: { provider: AIProvider; apiKey: string; model: string; baseUrl?: string; name: string }[] = [];
-    
-    // Active provider first (all keys)
-    const active = config.providers[config.activeProvider];
-    if (active?.apiKey) {
-      const allKeys = getAllKeysForProvider(config.activeProvider, active.apiKey);
-      allKeys.forEach((key: string, i: number) => {
-        configs.push({
-          provider: config.activeProvider,
-          apiKey: key,
-          model: active.model,
-          baseUrl: active.baseUrl,
-          name: `${config.activeProvider}${i > 0 ? ` #${i + 1}` : ""}`,
-        });
-      });
+    type Cfg = { provider: AIProvider; apiKey: string; model: string; baseUrl?: string; name: string };
+    const configs: Cfg[] = [];
+    const seen = new Set<string>();
+
+    const push = (c: Cfg) => {
+      if (!c.apiKey || seen.has(c.apiKey)) return;
+      seen.add(c.apiKey);
+      configs.push(c);
+    };
+
+    const activeModule = config.activeModuleId
+      ? modules.find((m) => m.id === config.activeModuleId)
+      : undefined;
+
+    // ── 1. Module's primary group ──────────────────────────────────────────
+    if (activeModule?.groupId) {
+      const group = getGroupById(activeModule.groupId);
+      if (group) {
+        group.keys.forEach((k, i) => push({
+          provider: group.provider,
+          apiKey:   k.key,
+          model:    activeModule.model,
+          name:     `${activeModule.name} › ${group.name}${i > 0 ? ` #${i + 1}` : ''}`,
+        }));
+      }
     }
 
-    // Then all other providers with keys (all their extra keys too)
-    const otherProviders: AIProvider[] = ['groq', 'openai', 'openrouter', 'gemini', 'custom'];
-    otherProviders
-      .filter(p => p !== config.activeProvider)
-      .forEach(p => {
+    // ── 2. Active provider key pool ────────────────────────────────────────
+    const effectiveProvider = activeModule?.provider ?? config.activeProvider;
+    const effectiveModel    = activeModule?.model    ?? config.providers[effectiveProvider]?.model;
+    const primary = config.providers[effectiveProvider];
+    if (primary?.apiKey) {
+      getAllKeysForProvider(effectiveProvider, primary.apiKey).forEach((key, i) => push({
+        provider: effectiveProvider,
+        apiKey:   key,
+        model:    effectiveModel,
+        baseUrl:  primary.baseUrl,
+        name:     `${effectiveProvider}${i > 0 ? ` #${i + 1}` : ''}`,
+      }));
+    }
+
+    // ── 3. Module fallback provider ────────────────────────────────────────
+    if (activeModule?.fallbackProvider) {
+      const fbGroup = activeModule.fallbackGroupId
+        ? getGroupById(activeModule.fallbackGroupId)
+        : undefined;
+
+      if (fbGroup) {
+        fbGroup.keys.forEach((k, i) => push({
+          provider: activeModule.fallbackProvider!,
+          apiKey:   k.key,
+          model:    activeModule.fallbackModel ?? config.providers[activeModule.fallbackProvider!]?.model ?? '',
+          name:     `${activeModule.name} fallback › ${fbGroup.name}${i > 0 ? ` #${i + 1}` : ''}`,
+        }));
+      } else {
+        const fbEntry = config.providers[activeModule.fallbackProvider];
+        if (fbEntry?.apiKey) {
+          getAllKeysForProvider(activeModule.fallbackProvider, fbEntry.apiKey).forEach((key, i) => push({
+            provider: activeModule.fallbackProvider!,
+            apiKey:   key,
+            model:    activeModule.fallbackModel ?? fbEntry.model,
+            baseUrl:  fbEntry.baseUrl,
+            name:     `${activeModule.fallbackProvider} fallback${i > 0 ? ` #${i + 1}` : ''}`,
+          }));
+        }
+      }
+    }
+
+    // ── 4. All other providers ─────────────────────────────────────────────
+    const others: AIProvider[] = ['groq', 'openai', 'openrouter', 'gemini', 'custom'];
+    others.filter((p) => p !== effectiveProvider && p !== activeModule?.fallbackProvider)
+      .forEach((p) => {
         const entry = config.providers[p];
         if (entry?.apiKey) {
-          const allKeys = getAllKeysForProvider(p, entry.apiKey);
-          allKeys.forEach((key: string, i: number) => {
-            configs.push({
-              provider: p,
-              apiKey: key,
-              model: entry.model,
-              baseUrl: entry.baseUrl,
-              name: `${p}${i > 0 ? ` #${i + 1}` : ""}`,
-            });
-          });
+          getAllKeysForProvider(p, entry.apiKey).forEach((key, i) => push({
+            provider: p,
+            apiKey:   key,
+            model:    entry.model,
+            baseUrl:  entry.baseUrl,
+            name:     `${p}${i > 0 ? ` #${i + 1}` : ''}`,
+          }));
         }
       });
 
     return configs;
+  }, [config, modules]);
+
+  const getActiveConfig = useCallback(() => {
+    const entry = config.providers[config.activeProvider];
+    return { provider: config.activeProvider, apiKey: entry.apiKey, model: entry.model, baseUrl: entry.baseUrl, name: config.activeProvider };
   }, [config]);
 
-  // ── Failover key pool (shared, stored in app_settings) ──
-  const addKey = useCallback(async (provider: AIProvider, key: string, label?: string) => {
+  // ── ExtraKey pool ──────────────────────────────────────────────────────────
+  const addKey    = useCallback(async (provider: AIProvider, key: string, label?: string) => {
     setExtraKeys(await addExtraKey(provider, key.trim(), label));
   }, []);
-
   const removeKey = useCallback(async (provider: AIProvider, id: string) => {
     setExtraKeys(await removeExtraKey(provider, id));
   }, []);
 
+  // ── API Groups ─────────────────────────────────────────────────────────────
+  const createGroup = useCallback(async (provider: AIProvider, name: string, notes?: string) => {
+    await createApiGroup(provider, name, notes);
+    setGroups([...getCachedGroups()]);
+  }, []);
+
+  const updateGroup = useCallback(async (id: string, patch: Partial<Pick<ApiGroup, 'name' | 'notes'>>) => {
+    await updateApiGroup(id, patch);
+    setGroups([...getCachedGroups()]);
+  }, []);
+
+  const deleteGroup = useCallback(async (id: string) => {
+    await deleteApiGroup(id);
+    setGroups([...getCachedGroups()]);
+    setModules([...getCachedModules()]);
+  }, []);
+
+  const addGroupKey = useCallback(async (groupId: string, key: string, label?: string) => {
+    await addKeyToGroup(groupId, key, label);
+    setGroups([...getCachedGroups()]);
+  }, []);
+
+  const removeGroupKey = useCallback(async (groupId: string, keyId: string) => {
+    await removeKeyFromGroup(groupId, keyId);
+    setGroups([...getCachedGroups()]);
+  }, []);
+
+  // ── AI Modules ─────────────────────────────────────────────────────────────
+  const createModule = useCallback(async (
+    name: string, provider: AIProvider, model: string,
+    opts?: Parameters<typeof createAIModule>[3],
+  ) => {
+    await createAIModule(name, provider, model, opts);
+    setModules([...getCachedModules()]);
+  }, []);
+
+  const updateModule = useCallback(async (id: string, patch: Parameters<typeof updateAIModule>[1]) => {
+    await updateAIModule(id, patch);
+    setModules([...getCachedModules()]);
+  }, []);
+
+  const deleteModule = useCallback(async (id: string) => {
+    await deleteAIModule(id);
+    setModules([...getCachedModules()]);
+    if (config.activeModuleId === id) setConfig((p) => ({ ...p, activeModuleId: undefined }));
+  }, [config.activeModuleId]);
+
   const hasActiveKey = config.providers[config.activeProvider]?.apiKey?.length > 0;
-  const totalConfiguredKeys = Object.values(config.providers).filter(p => p.apiKey?.length > 0).length;
+  const totalConfiguredKeys = Object.values(config.providers).filter((p) => p.apiKey?.length > 0).length;
 
   return {
-    config, loading, updateProvider, setActiveProvider, getActiveConfig, getAllConfigs,
-    hasActiveKey, totalConfiguredKeys, extraKeys, addKey, removeKey,
+    // Core config
+    config, loading,
+    updateProvider, setActiveProvider, getActiveConfig, getAllConfigs,
+    hasActiveKey, totalConfiguredKeys,
+    // Extra key pool (per-provider, legacy)
+    extraKeys, addKey, removeKey,
+    // API Groups
+    groups, createGroup, updateGroup, deleteGroup, addGroupKey, removeGroupKey,
+    // AI Modules
+    modules, setActiveModule, createModule, updateModule, deleteModule,
   };
 }

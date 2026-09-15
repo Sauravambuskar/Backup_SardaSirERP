@@ -1,41 +1,104 @@
 /**
- * Multi-Key Store — extra API keys per provider, for failover and rotation.
+ * Multi-Key Store — extra API keys per provider, AI Modules, and API Groups.
  *
- * Keys live in the shared `app_settings` table (row key `ai_extra_keys`), not in
- * localStorage, so every user and every device sees the same failover pool —
- * matching how the primary keys in `ai_config` already behave.
+ * All data lives in the shared `app_settings` table so every user/device sees
+ * the same configuration, matching how primary keys in `ai_config` behave.
  *
- * Reads are served from an in-memory cache so the hot path (building the
- * failover chain on every request) stays synchronous.
+ * ─── Concepts ────────────────────────────────────────────────────────────────
+ *
+ *  ExtraKey   – a spare API key for a provider (key pool / round-robin)
+ *  ApiGroup   – a named group of keys for one provider (e.g. "Production Keys",
+ *               "Free Tier Pool"). Each group can hold up to MAX_KEYS_PER_GROUP
+ *               keys and falls back internally before escalating.
+ *  AIModule   – a named usage profile (e.g. "Legal Drafting", "Case Research").
+ *               Each module independently picks which provider+model to use and
+ *               which ApiGroup to draw keys from.  The active module is what
+ *               the AI Agent uses for all requests.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import { supabase } from '@/integrations/supabase/client';
 import type { AIProvider } from './ai-providers';
 
-/** Total keys allowed per provider, primary included. */
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/** Total keys allowed per provider (primary + spares). */
 export const MAX_KEYS_PER_PROVIDER = 6;
 /** Spares on top of the primary. */
 export const MAX_EXTRA_KEYS = MAX_KEYS_PER_PROVIDER - 1;
+/** Max keys inside a single API Group. */
+export const MAX_KEYS_PER_GROUP = 6;
+/** Max API Groups per provider. */
+export const MAX_GROUPS_PER_PROVIDER = 10;
+/** Max AI Modules. */
+export const MAX_MODULES = 20;
 
-const SETTINGS_KEY = 'ai_extra_keys';
+const SETTINGS_KEY     = 'ai_extra_keys';
+const GROUPS_KEY       = 'ai_api_groups';
+const MODULES_KEY      = 'ai_modules';
 const LEGACY_STORAGE_KEY = 'lawmind_extra_api_keys';
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+const PROVIDERS: AIProvider[] = ['groq', 'openai', 'gemini', 'openrouter', 'custom'];
+
 export interface ExtraKey {
-  id: string;
-  key: string;
-  label: string;
+  id:      string;
+  key:     string;
+  label:   string;
   addedAt: string;
 }
 
 export type ExtraKeysMap = Record<AIProvider, ExtraKey[]>;
 
-const PROVIDERS: AIProvider[] = ['groq', 'openai', 'gemini', 'openrouter', 'custom'];
+/** A single key entry inside an API Group. */
+export interface GroupKey {
+  id:      string;
+  key:     string;
+  label:   string;
+  addedAt: string;
+}
+
+/** A named group of API keys for one provider. */
+export interface ApiGroup {
+  id:       string;
+  name:     string;
+  provider: AIProvider;
+  keys:     GroupKey[];
+  /** Optional notes (e.g. "Paid plan, 40 RPM") */
+  notes?:   string;
+  createdAt: string;
+}
+
+/** A named AI usage profile / module. */
+export interface AIModule {
+  id:           string;
+  name:         string;
+  description?: string;
+  provider:     AIProvider;
+  model:        string;
+  /** ID of the ApiGroup to draw keys from (undefined = use the primary key pool). */
+  groupId?:     string;
+  /** Fallback provider if primary fails. */
+  fallbackProvider?: AIProvider;
+  fallbackModel?:    string;
+  fallbackGroupId?:  string;
+  createdAt:    string;
+  updatedAt:    string;
+}
+
+// ── In-memory caches ──────────────────────────────────────────────────────────
 
 function emptyMap(): ExtraKeysMap {
   return { groq: [], openai: [], gemini: [], openrouter: [], custom: [] };
 }
 
-/** Fill in any missing providers so callers never hit undefined. */
+let cache:        ExtraKeysMap = emptyMap();
+let groupsCache:  ApiGroup[]   = [];
+let modulesCache: AIModule[]   = [];
+
+// ── Normalisation ─────────────────────────────────────────────────────────────
+
 function normalise(raw: unknown): ExtraKeysMap {
   const out = emptyMap();
   if (!raw || typeof raw !== 'object') return out;
@@ -50,130 +113,329 @@ function normalise(raw: unknown): ExtraKeysMap {
   return out;
 }
 
-// ── In-memory cache (kept current by useAIConfig) ──────────────
-let cache: ExtraKeysMap = emptyMap();
-
-export function getCachedKeys(): ExtraKeysMap {
-  return cache;
+function normaliseGroups(raw: unknown): ApiGroup[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (g): g is ApiGroup =>
+      !!g &&
+      typeof g.id === 'string' &&
+      typeof g.name === 'string' &&
+      PROVIDERS.includes(g.provider) &&
+      Array.isArray(g.keys),
+  );
 }
 
-export function setCachedKeys(map: ExtraKeysMap): void {
-  cache = normalise(map);
+function normaliseModules(raw: unknown): AIModule[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (m): m is AIModule =>
+      !!m &&
+      typeof m.id === 'string' &&
+      typeof m.name === 'string' &&
+      PROVIDERS.includes(m.provider),
+  );
 }
 
-/** Extra keys for one provider, from cache. Synchronous by design. */
-export function getExtraKeys(provider: AIProvider): ExtraKey[] {
-  return cache[provider] || [];
-}
+// ── ExtraKeys (legacy per-provider key pool) ──────────────────────────────────
 
-/**
- * Every key for a provider, primary first then spares, de-duplicated.
- * This is the pool the failover chain rotates through.
- */
+export function getCachedKeys():  ExtraKeysMap { return cache;        }
+export function setCachedKeys(m: ExtraKeysMap) { cache = normalise(m); }
+export function getExtraKeys(provider: AIProvider): ExtraKey[] { return cache[provider] || []; }
+
 export function getAllKeysForProvider(provider: AIProvider, primaryKey: string): string[] {
   const keys = [primaryKey, ...getExtraKeys(provider).map((e) => e.key)].filter(Boolean);
   return [...new Set(keys)].slice(0, MAX_KEYS_PER_PROVIDER);
 }
 
 export function getTotalExtraKeys(): number {
-  return Object.values(cache).reduce((sum, list) => sum + list.length, 0);
+  return Object.values(cache).reduce((sum, l) => sum + l.length, 0);
 }
 
-// ── Persistence ────────────────────────────────────────────────
+// ── API Groups ────────────────────────────────────────────────────────────────
 
-/** One-time lift of keys that older builds left in localStorage. */
+export function getCachedGroups(): ApiGroup[] { return groupsCache; }
+
+export function getGroupsByProvider(provider: AIProvider): ApiGroup[] {
+  return groupsCache.filter((g) => g.provider === provider);
+}
+
+export function getGroupById(id: string): ApiGroup | undefined {
+  return groupsCache.find((g) => g.id === id);
+}
+
+/** All keys from a group as plain strings, for the failover chain. */
+export function getKeysFromGroup(groupId: string): string[] {
+  const group = getGroupById(groupId);
+  if (!group) return [];
+  return group.keys.map((k) => k.key).filter(Boolean);
+}
+
+// ── AI Modules ────────────────────────────────────────────────────────────────
+
+export function getCachedModules(): AIModule[] { return modulesCache; }
+
+export function getModuleById(id: string): AIModule | undefined {
+  return modulesCache.find((m) => m.id === id);
+}
+
+// ── Persistence helpers ───────────────────────────────────────────────────────
+
+async function fetchSetting<T>(key: string): Promise<T | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (supabase as any)
+    .from('app_settings')
+    .select('value')
+    .eq('key', key)
+    .maybeSingle();
+  if (error) { console.warn(`[multiKeyStore] Could not load ${key}:`, error.message); return null; }
+  return data?.value ?? null;
+}
+
+async function saveSetting(key: string, value: unknown): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = await (supabase as any)
+    .from('app_settings')
+    .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+  if (error) throw new Error(error.message);
+}
+
+// ── Load all ──────────────────────────────────────────────────────────────────
+
 function readLegacyLocalKeys(): ExtraKeysMap | null {
   try {
     const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) return null;
     const parsed = normalise(JSON.parse(raw));
     return Object.values(parsed).some((l) => l.length > 0) ? parsed : null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-/** Load the shared pool from the database into the cache. */
 export async function fetchExtraKeys(): Promise<ExtraKeysMap> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (supabase as any)
-    .from('app_settings')
-    .select('value')
-    .eq('key', SETTINGS_KEY)
-    .maybeSingle();
+  const raw = await fetchSetting<unknown>(SETTINGS_KEY);
+  let map = normalise(raw);
 
-  if (error) {
-    console.warn('[multiKeyStore] Could not load extra keys:', error.message);
-    return cache;
-  }
-
-  let map = normalise(data?.value);
-
-  // Nothing stored yet — adopt anything this browser was holding, once.
-  if (!data && Object.values(map).every((l) => l.length === 0)) {
+  if (!raw && Object.values(map).every((l) => l.length === 0)) {
     const legacy = readLegacyLocalKeys();
     if (legacy) {
       map = legacy;
       await persistExtraKeys(map);
       try { localStorage.removeItem(LEGACY_STORAGE_KEY); } catch { /* ignore */ }
-      console.info('[multiKeyStore] Migrated browser-local failover keys to the shared database.');
     }
   }
-
   cache = map;
   return map;
 }
 
-/** Write the pool back. Admin-only, enforced by RLS on app_settings. */
+export async function fetchApiGroups(): Promise<ApiGroup[]> {
+  const raw = await fetchSetting<unknown>(GROUPS_KEY);
+  groupsCache = normaliseGroups(raw);
+  return groupsCache;
+}
+
+export async function fetchAIModules(): Promise<AIModule[]> {
+  const raw = await fetchSetting<unknown>(MODULES_KEY);
+  modulesCache = normaliseModules(raw);
+  return modulesCache;
+}
+
+/** Fetch everything at once — call this from useAIConfig on mount. */
+export async function fetchAllStoreData(): Promise<{
+  extraKeys: ExtraKeysMap;
+  groups: ApiGroup[];
+  modules: AIModule[];
+}> {
+  const [extraKeys, groups, modules] = await Promise.all([
+    fetchExtraKeys(),
+    fetchApiGroups(),
+    fetchAIModules(),
+  ]);
+  return { extraKeys, groups, modules };
+}
+
+// ── Persist helpers ───────────────────────────────────────────────────────────
+
 export async function persistExtraKeys(map: ExtraKeysMap): Promise<void> {
   const value = normalise(map);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (supabase as any)
-    .from('app_settings')
-    .upsert({ key: SETTINGS_KEY, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
-
-  if (error) throw new Error(error.message);
+  await saveSetting(SETTINGS_KEY, value);
   cache = value;
 }
 
+export async function persistApiGroups(groups: ApiGroup[]): Promise<void> {
+  await saveSetting(GROUPS_KEY, groups);
+  groupsCache = groups;
+}
+
+export async function persistAIModules(modules: AIModule[]): Promise<void> {
+  await saveSetting(MODULES_KEY, modules);
+  modulesCache = modules;
+}
+
+// ── ExtraKey CRUD ─────────────────────────────────────────────────────────────
+
 export class KeyLimitError extends Error {}
 
-/**
- * Add a spare key. Throws KeyLimitError when the provider is full, and
- * refuses duplicates so a pasted-twice key does not eat a slot.
- */
 export async function addExtraKey(
   provider: AIProvider,
   key: string,
   label?: string,
 ): Promise<ExtraKeysMap> {
   const map = { ...cache, [provider]: [...(cache[provider] || [])] };
-
   if (map[provider].length >= MAX_EXTRA_KEYS) {
     throw new KeyLimitError(
-      `${provider} already has the maximum of ${MAX_KEYS_PER_PROVIDER} keys (1 primary + ${MAX_EXTRA_KEYS} spares).`,
+      `${provider} already has the maximum of ${MAX_KEYS_PER_PROVIDER} keys.`,
     );
   }
   if (map[provider].some((k) => k.key === key)) {
     throw new Error('That key is already in the pool.');
   }
-
   map[provider].push({
     id: crypto.randomUUID(),
     key,
     label: label || `${provider} key #${map[provider].length + 2}`,
     addedAt: new Date().toISOString(),
   });
-
   await persistExtraKeys(map);
   return cache;
 }
 
 export async function removeExtraKey(provider: AIProvider, id: string): Promise<ExtraKeysMap> {
-  const map = {
-    ...cache,
-    [provider]: (cache[provider] || []).filter((k) => k.id !== id),
-  };
+  const map = { ...cache, [provider]: (cache[provider] || []).filter((k) => k.id !== id) };
   await persistExtraKeys(map);
   return cache;
+}
+
+// ── ApiGroup CRUD ─────────────────────────────────────────────────────────────
+
+export async function createApiGroup(
+  provider: AIProvider,
+  name: string,
+  notes?: string,
+): Promise<ApiGroup> {
+  const existing = groupsCache.filter((g) => g.provider === provider);
+  if (existing.length >= MAX_GROUPS_PER_PROVIDER) {
+    throw new Error(`Maximum ${MAX_GROUPS_PER_PROVIDER} groups per provider.`);
+  }
+  const group: ApiGroup = {
+    id: crypto.randomUUID(),
+    name,
+    provider,
+    keys: [],
+    notes,
+    createdAt: new Date().toISOString(),
+  };
+  const updated = [...groupsCache, group];
+  await persistApiGroups(updated);
+  return group;
+}
+
+export async function updateApiGroup(
+  id: string,
+  patch: Partial<Pick<ApiGroup, 'name' | 'notes'>>,
+): Promise<ApiGroup[]> {
+  const updated = groupsCache.map((g) => g.id === id ? { ...g, ...patch } : g);
+  await persistApiGroups(updated);
+  return groupsCache;
+}
+
+export async function deleteApiGroup(id: string): Promise<ApiGroup[]> {
+  const updated = groupsCache.filter((g) => g.id !== id);
+  await persistApiGroups(updated);
+  // Unlink any module that referenced this group
+  const updatedModules = modulesCache.map((m) => ({
+    ...m,
+    groupId:         m.groupId         === id ? undefined : m.groupId,
+    fallbackGroupId: m.fallbackGroupId === id ? undefined : m.fallbackGroupId,
+  }));
+  await persistAIModules(updatedModules);
+  return groupsCache;
+}
+
+export async function addKeyToGroup(
+  groupId: string,
+  key: string,
+  label?: string,
+): Promise<ApiGroup[]> {
+  const group = groupsCache.find((g) => g.id === groupId);
+  if (!group) throw new Error('Group not found.');
+  if (group.keys.length >= MAX_KEYS_PER_GROUP) {
+    throw new Error(`Group is full (max ${MAX_KEYS_PER_GROUP} keys).`);
+  }
+  if (group.keys.some((k) => k.key === key)) {
+    throw new Error('That key is already in this group.');
+  }
+  const newKey: GroupKey = {
+    id: crypto.randomUUID(),
+    key,
+    label: label || `Key #${group.keys.length + 1}`,
+    addedAt: new Date().toISOString(),
+  };
+  const updated = groupsCache.map((g) =>
+    g.id === groupId ? { ...g, keys: [...g.keys, newKey] } : g,
+  );
+  await persistApiGroups(updated);
+  return groupsCache;
+}
+
+export async function removeKeyFromGroup(
+  groupId: string,
+  keyId: string,
+): Promise<ApiGroup[]> {
+  const updated = groupsCache.map((g) =>
+    g.id === groupId ? { ...g, keys: g.keys.filter((k) => k.id !== keyId) } : g,
+  );
+  await persistApiGroups(updated);
+  return groupsCache;
+}
+
+// ── AIModule CRUD ─────────────────────────────────────────────────────────────
+
+export async function createAIModule(
+  name: string,
+  provider: AIProvider,
+  model: string,
+  opts?: {
+    description?: string;
+    groupId?: string;
+    fallbackProvider?: AIProvider;
+    fallbackModel?: string;
+    fallbackGroupId?: string;
+  },
+): Promise<AIModule> {
+  if (modulesCache.length >= MAX_MODULES) {
+    throw new Error(`Maximum ${MAX_MODULES} modules reached.`);
+  }
+  const now = new Date().toISOString();
+  const mod: AIModule = {
+    id:           crypto.randomUUID(),
+    name,
+    description:  opts?.description,
+    provider,
+    model,
+    groupId:      opts?.groupId,
+    fallbackProvider: opts?.fallbackProvider,
+    fallbackModel:    opts?.fallbackModel,
+    fallbackGroupId:  opts?.fallbackGroupId,
+    createdAt:    now,
+    updatedAt:    now,
+  };
+  const updated = [...modulesCache, mod];
+  await persistAIModules(updated);
+  return mod;
+}
+
+export async function updateAIModule(
+  id: string,
+  patch: Partial<Omit<AIModule, 'id' | 'createdAt'>>,
+): Promise<AIModule[]> {
+  const updated = modulesCache.map((m) =>
+    m.id === id ? { ...m, ...patch, updatedAt: new Date().toISOString() } : m,
+  );
+  await persistAIModules(updated);
+  return modulesCache;
+}
+
+export async function deleteAIModule(id: string): Promise<AIModule[]> {
+  const updated = modulesCache.filter((m) => m.id !== id);
+  await persistAIModules(updated);
+  return modulesCache;
 }
