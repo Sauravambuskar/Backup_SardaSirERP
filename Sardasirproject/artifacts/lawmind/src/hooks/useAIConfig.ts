@@ -41,7 +41,7 @@ export interface AIConfig {
 
 const DEFAULT_CONFIG: AIConfig = {
   providers: {
-    groq:       { apiKey: '', model: 'groq/compound',                              enabled: false },
+    groq:       { apiKey: '', model: 'llama-3.3-70b-versatile',                      enabled: false },
     openai:     { apiKey: '', model: 'gpt-4o-mini',                                enabled: false },
     gemini:     { apiKey: '', model: 'gemini-2.0-flash',                           enabled: false },
     openrouter: { apiKey: '', model: 'meta-llama/llama-3.3-70b-instruct:free',    enabled: false },

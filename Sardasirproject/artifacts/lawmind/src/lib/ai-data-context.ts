@@ -1,154 +1,194 @@
 import { restGet, restCount } from "@/lib/restClient";
 
-/** Fetch rows for AI context; returns [] on any failure so the AI still answers. */
+/** Fetch rows for AI context; returns [] on any failure. */
 async function fetchFromRest(path: string): Promise<any[]> {
-  try {
-    return await restGet<any>(path);
-  } catch {
-    return [];
-  }
+  try { return await restGet<any>(path); } catch { return []; }
 }
 
-/** Fetch summary counts */
+// ── Token budget ──────────────────────────────────────────────────────────────
+// Groq free tier: ~8k token context window for the system prompt.
+// We keep the whole system + data block under ~6000 chars (~1500 tokens).
+const MAX_CONTEXT_CHARS = 5500;
+
+function truncate(str: string): string {
+  if (str.length <= MAX_CONTEXT_CHARS) return str;
+  return str.slice(0, MAX_CONTEXT_CHARS) + "\n\n_[Context truncated to fit token limit. Ask for specific data if needed.]_";
+}
+
+// ── Summary stats (always small) ─────────────────────────────────────────────
 async function fetchSummaryStats(): Promise<string> {
   const today = new Date().toISOString().split("T")[0];
-  const [totalCases, pendingCases, disposedCases, upcomingHearings] = await Promise.all([
+  const [total, open, pending, disposed, hearingsCount, clients, invoices] = await Promise.all([
     restCount("cases"),
+    restCount("cases", "status=eq.open"),
     restCount("cases", "status=eq.pending"),
     restCount("cases", "status=eq.disposed"),
-    restCount("cases", `next_hearing_date=gte.${today}`),
+    restCount("hearings", `hearing_date=gte.${today}&status=neq.cancelled`),
+    restCount("clients"),
+    restCount("invoices"),
   ]);
-
-  return `- Total Cases: ${totalCases}
-- Pending Cases: ${pendingCases}
-- Disposed Cases: ${disposedCases}
-- Cases with Upcoming Hearings: ${upcomingHearings}
-- NOTE: Hearing dates are stored in cases.next_hearing_date column (NOT in a separate hearings table)`;
+  return [
+    `Total Cases: ${total}`,
+    `Open: ${open} | Pending: ${pending} | Disposed: ${disposed}`,
+    `Upcoming Hearings: ${hearingsCount}`,
+    `Clients: ${clients} | Invoices: ${invoices}`,
+  ].join("\n");
 }
 
-async function fetchCases(limit = 50) {
-  return fetchFromRest(`cases?select=case_number,title,status,court_name,court_type,case_stage,next_hearing_date,filing_date,cnr_number,case_side,fir_number,police_station&order=created_at.desc&limit=${limit}`);
+// ── Data fetchers (small limits to avoid 413) ─────────────────────────────────
+
+async function fetchActiveCases() {
+  const [open, pending] = await Promise.all([
+    fetchFromRest(`cases?select=case_number,title,status,court_name,case_type,filing_date&status=eq.open&order=created_at.desc&limit=20`),
+    fetchFromRest(`cases?select=case_number,title,status,court_name,case_type,filing_date&status=eq.pending&order=created_at.desc&limit=20`),
+  ]);
+  return [...open, ...pending];
 }
 
-async function fetchClients(limit = 30) {
-  return fetchFromRest(`clients?select=name,email,phone,city,state&order=created_at.desc&limit=${limit}`);
-}
-
-async function fetchHearings(limit = 30) {
-  // Hearings are stored in cases.next_hearing_date, not a separate table
-  return fetchUpcomingHearings();
-}
-
-async function fetchInvoices(limit = 30) {
-  return fetchFromRest(`invoices?select=invoice_number,amount,tax,total,status,due_date,paid_date&order=created_at.desc&limit=${limit}`);
-}
-
-async function fetchExpenses(limit = 30) {
-  return fetchFromRest(`expenses?select=title,amount,category,expense_date,description&order=expense_date.desc&limit=${limit}`);
-}
-
-async function fetchAdvocates(limit = 30) {
-  return fetchFromRest(`advocates?select=name,email,phone,specialization,status&order=created_at.desc&limit=${limit}`);
-}
-
-async function fetchDocuments(limit = 30) {
-  return fetchFromRest(`documents?select=title,document_type,description&order=created_at.desc&limit=${limit}`);
+async function fetchDisposedCases() {
+  return fetchFromRest(`cases?select=case_number,title,status,court_name,filing_date&status=in.(disposed,closed)&order=updated_at.desc&limit=15`);
 }
 
 async function fetchUpcomingHearings() {
   const today = new Date().toISOString().split("T")[0];
-  return fetchFromRest(`cases?select=case_number,title,next_hearing_date,court_name,case_stage&next_hearing_date=gte.${today}&order=next_hearing_date.asc&limit=20`);
+  return fetchFromRest(`hearings?select=hearing_date,court_name,judge_name,purpose,status&hearing_date=gte.${today}&status=neq.cancelled&order=hearing_date.asc&limit=15`);
 }
 
-async function fetchPendingCases() {
-  return fetchFromRest(`cases?select=case_number,title,status,court_name,case_stage,next_hearing_date,filing_date&status=eq.pending&order=next_hearing_date.asc&limit=50`);
+async function fetchTodayHearings() {
+  const today = new Date().toISOString().split("T")[0];
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+  return fetchFromRest(`hearings?select=hearing_date,court_name,judge_name,purpose,status&hearing_date=gte.${today}&hearing_date=lt.${tomorrow}&order=hearing_date.asc`);
 }
 
-async function fetchDisposedCases() {
-  return fetchFromRest(`cases?select=case_number,title,status,court_name,case_stage,disposed_date&status=eq.disposed&order=disposed_date.desc&limit=30`);
+async function fetchClients() {
+  return fetchFromRest(`clients?select=name,email,phone,city&order=created_at.desc&limit=20`);
 }
 
+async function fetchInvoices() {
+  return fetchFromRest(`invoices?select=invoice_number,amount,total,status,due_date&order=created_at.desc&limit=20`);
+}
+
+async function fetchExpenses() {
+  return fetchFromRest(`expenses?select=title,amount,category,expense_date&order=expense_date.desc&limit=15`);
+}
+
+async function fetchAdvocates() {
+  return fetchFromRest(`advocates?select=name,phone,specialization,status&order=created_at.desc&limit=15`);
+}
+
+async function fetchTasks() {
+  return fetchFromRest(`tasks?select=title,status,due_date,priority&order=due_date.asc&limit=15`);
+}
+
+async function fetchDocuments() {
+  return fetchFromRest(`documents?select=title,document_type,created_at&order=created_at.desc&limit=15`);
+}
+
+// ── Compact table (key columns only, no wrap) ─────────────────────────────────
 function toTable(rows: Record<string, unknown>[]): string {
-  if (!rows.length) return '_No records found._';
+  if (!rows?.length) return "_No records found._";
   const keys = Object.keys(rows[0]);
-  const header = `| ${keys.join(' | ')} |`;
-  const sep = `| ${keys.map(() => '---').join(' | ')} |`;
-  const body = rows.map((r) => `| ${keys.map((k) => String(r[k] ?? '—')).join(' | ')} |`).join('\n');
+  const header = `| ${keys.join(" | ")} |`;
+  const sep    = `| ${keys.map(() => "---").join(" | ")} |`;
+  const body   = rows.map(r => `| ${keys.map(k => String(r[k] ?? "—").slice(0, 40)).join(" | ")} |`).join("\n");
   return `${header}\n${sep}\n${body}`;
 }
 
-/** Build a context string to inject into the AI system prompt */
+// ── Main builder ──────────────────────────────────────────────────────────────
 export async function buildDataContext(userMessage: string): Promise<string> {
   const lower = userMessage.toLowerCase();
   const parts: string[] = [];
 
-  // Always include summary
-  const stats = await fetchSummaryStats();
-  parts.push(`## Practice Summary\n${stats}`);
+  // Always include compact summary
+  parts.push(`## Summary\n${await fetchSummaryStats()}`);
 
-  // Smart data fetching based on user intent
-  if (/pending|active|open/i.test(lower)) {
-    parts.push(`\n## Pending Cases (status=pending)\n${toTable(await fetchPendingCases())}`);
+  // ── Cases ─────────────────────────────────────────────────────────────────
+  if (/pending|open|active|show.*case|all.*case|list.*case/i.test(lower)) {
+    const rows = await fetchActiveCases();
+    parts.push(`\n## Active Cases (open + pending) — ${rows.length} records\n${toTable(rows)}`);
   }
-  if (/disposed|closed|completed/i.test(lower)) {
-    parts.push(`\n## Disposed Cases\n${toTable(await fetchDisposedCases())}`);
+
+  if (/disposed|closed|completed|finished/i.test(lower)) {
+    const rows = await fetchDisposedCases();
+    parts.push(`\n## Disposed/Closed Cases — ${rows.length} records\n${toTable(rows)}`);
   }
-  if (/upcoming|next.*hearing|tomorrow|today.*hearing|calendar|hearing.*date|show.*hearing|hearing/i.test(lower)) {
-    parts.push(`\n## Upcoming Hearings (cases with future next_hearing_date)\n${toTable(await fetchUpcomingHearings())}`);
+
+  // ── Hearings ──────────────────────────────────────────────────────────────
+  if (/today.*hearing|hearing.*today/i.test(lower)) {
+    const rows = await fetchTodayHearings();
+    parts.push(`\n## Today's Hearings — ${rows.length} records\n${toTable(rows)}`);
   }
-  if (/case|matter|filing|court|all.*case|show.*case|list.*case/i.test(lower)) {
-    parts.push(`\n## Cases (latest 50)\n${toTable(await fetchCases())}`);
+
+  if (/hearing|calendar|next.*date|upcoming/i.test(lower)) {
+    const rows = await fetchUpcomingHearings();
+    parts.push(`\n## Upcoming Hearings — ${rows.length} records\n${toTable(rows)}`);
   }
-  if (/client|customer/i.test(lower)) {
-    parts.push(`\n## Clients\n${toTable(await fetchClients())}`);
+
+  // ── Clients ───────────────────────────────────────────────────────────────
+  if (/client|customer|party/i.test(lower)) {
+    const rows = await fetchClients();
+    parts.push(`\n## Clients — ${rows.length} records\n${toTable(rows)}`);
   }
-  if (/invoice|bill|payment|amount|revenue|money/i.test(lower)) {
-    parts.push(`\n## Invoices\n${toTable(await fetchInvoices())}`);
+
+  // ── Financial ─────────────────────────────────────────────────────────────
+  if (/invoice|bill|payment|fee|financial|revenue|money/i.test(lower)) {
+    const rows = await fetchInvoices();
+    parts.push(`\n## Invoices — ${rows.length} records\n${toTable(rows)}`);
   }
+
   if (/expense|cost|spend/i.test(lower)) {
-    parts.push(`\n## Expenses\n${toTable(await fetchExpenses())}`);
-  }
-  if (/advocate|lawyer|attorney/i.test(lower)) {
-    parts.push(`\n## Advocates\n${toTable(await fetchAdvocates())}`);
-  }
-  if (/document|file/i.test(lower)) {
-    parts.push(`\n## Documents\n${toTable(await fetchDocuments())}`);
+    const rows = await fetchExpenses();
+    parts.push(`\n## Expenses — ${rows.length} records\n${toTable(rows)}`);
   }
 
-  // If no specific keywords matched, provide overview with hearings
+  // ── Advocates ─────────────────────────────────────────────────────────────
+  if (/advocate|lawyer|counsel/i.test(lower)) {
+    const rows = await fetchAdvocates();
+    parts.push(`\n## Advocates — ${rows.length} records\n${toTable(rows)}`);
+  }
+
+  // ── Tasks ─────────────────────────────────────────────────────────────────
+  if (/task|todo|to-do|action/i.test(lower)) {
+    const rows = await fetchTasks();
+    parts.push(`\n## Tasks — ${rows.length} records\n${toTable(rows)}`);
+  }
+
+  // ── Documents ─────────────────────────────────────────────────────────────
+  if (/document|file|attachment/i.test(lower)) {
+    const rows = await fetchDocuments();
+    parts.push(`\n## Documents — ${rows.length} records\n${toTable(rows)}`);
+  }
+
+  // ── Default: show active cases + upcoming hearings ─────────────────────────
   if (parts.length === 1) {
-    const [cases, upcoming] = await Promise.all([fetchCases(20), fetchUpcomingHearings()]);
-    parts.push(`\n## Recent Cases (top 20)\n${toTable(cases)}`);
-    parts.push(`\n## Upcoming Hearings\n${toTable(upcoming)}`);
+    const [cases, hearings] = await Promise.all([fetchActiveCases(), fetchUpcomingHearings()]);
+    parts.push(`\n## Active Cases (top 20)\n${toTable(cases.slice(0, 15))}`);
+    parts.push(`\n## Upcoming Hearings (next 10)\n${toTable(hearings.slice(0, 10))}`);
   }
 
-  return parts.join('\n\n');
+  // Hard truncate to stay under token limit
+  return truncate(parts.join("\n\n"));
 }
 
+// ── System prompt (kept compact) ─────────────────────────────────────────────
 export function getSystemPrompt(dataContext: string): string {
-  return `You are **LawMind AI**, an intelligent legal practice assistant for Advocate Manmohan D. Sarda's law firm in Akola/Washim, Maharashtra, India.
+  return `You are LawMind AI — legal practice assistant for Advocate Manmohan D. Sarda, Akola/Washim, Maharashtra.
 
-You have DIRECT ACCESS to the firm's LIVE database. The data below is REAL — use it to answer ALL questions.
+**DB SCHEMA:**
+- cases: case_number, title, status (open/pending/disposed/closed), case_type, court_name, filing_date
+- hearings: hearing_date, court_name, judge_name, purpose, status
+- clients: name, email, phone, city
+- invoices: invoice_number, amount, total, status, due_date
+- expenses: title, amount, category, expense_date
+- advocates: name, phone, specialization
 
-### IMPORTANT DATA NOTES:
-- **Hearing dates are in the "next_hearing_date" column of cases** (NOT a separate hearings table)
-- When asked about upcoming hearings → show cases where next_hearing_date is in the future
-- All case data (case_number, title, status, court_name, next_hearing_date, filing_date) is REAL
+**RULES:**
+- Use ONLY the data below — it is LIVE and REAL
+- "pending cases" = open + pending status combined
+- Show markdown tables for lists
+- All amounts in ₹
+- If data shows 0 records but summary shows non-zero, say "data loaded partially"
 
-### Your Job:
-1. **Answer with REAL data** — never say "data not available" if it's in the tables below
-2. **Show tables** when listing multiple records
-3. **Include case numbers, dates, court names** from the actual data
-4. **Format in Markdown** — use tables, bold, headers
-5. **Hearing = cases with next_hearing_date** (that's where hearing info lives)
-
-### LIVE DATABASE:
-${dataContext}
-
-### Rules:
-- ALWAYS use the data above to answer
-- When user asks "show hearings" → show cases with next_hearing_date from the data
-- Never say "0 hearings" if there are cases with next_hearing_date values
-- All amounts in ₹ (Indian Rupees)
-- Be specific — use actual case numbers and dates from the data`;
+**LIVE DATA:**
+${dataContext}`;
 }
