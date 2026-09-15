@@ -48,7 +48,6 @@ const ImpDocsPage      = lazy(() => import("./pages/ImpDocsPage"));
 const NoticeMakerPage   = lazy(() => import("./pages/NoticeMakerPage"));
 const QuickDocsPage     = lazy(() => import("./pages/QuickDocsPage"));
 const NotFound          = lazy(() => import("./pages/NotFound"));
-
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -104,6 +103,7 @@ const App = () => (
                   <Route path="/setup/reports"       element={<ReportsPage />} />
                   <Route path="/setup/logs"          element={<AuditLogsPage />} />
                   <Route path="/setup/ai-settings"   element={<AISettingsPage />} />
+                  <Route path="/setup/ai-modules"    element={<AISettingsPage />} />
                   <Route path="/setup/permissions"   element={<PermissionsPage />} />
                   <Route path="/setup/email"         element={<EmailSettingsPage />} />
                   <Route path="/ai-agent"            element={<AIAgentPage />} />

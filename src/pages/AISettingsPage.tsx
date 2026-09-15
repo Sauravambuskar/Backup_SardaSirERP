@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useLocation } from "react-router-dom";
 import { useAIConfig } from "@/hooks/useAIConfig";
 import { useAppSettings } from "@/hooks/useAppSettings";
 import { useRole } from "@/hooks/useRole";
@@ -45,7 +46,15 @@ export default function AISettingsPage() {
   } = useAIConfig();
   const { settings: appSettings, setAutofill, isSaving } = useAppSettings();
   const { isAdminOrAbove } = useRole();
-  const [tab, setTab] = useState<Tab>("providers");
+  const location = useLocation();
+  const [tab, setTab] = useState<Tab>(() =>
+    location.pathname === "/setup/ai-modules" ? "modules" : "providers"
+  );
+
+  // If navigated to /setup/ai-modules, switch to modules tab
+  useEffect(() => {
+    if (location.pathname === "/setup/ai-modules") setTab("modules");
+  }, [location.pathname]);
 
   if (!isAdminOrAbove) {
     return (
