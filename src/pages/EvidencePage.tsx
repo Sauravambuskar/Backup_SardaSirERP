@@ -17,20 +17,12 @@ import { toast } from "sonner";
 import { usePagination } from "@/hooks/usePagination";
 import { TablePagination } from "@/components/TablePagination";
 import { DeleteConfirm } from "@/components/DeleteConfirm";
-import { FileUpload } from "@/components/FileUpload";
+import { R2Upload } from "@/components/R2Upload";
 import { PageLoader } from "@/components/PageLoader";
 import { exportToCSV } from "@/lib/export";
-import { getSignedFileUrl } from "@/lib/storage";
 
 const emptyForm = { case_id: "", title: "", description: "", evidence_type: "", file_url: "" };
-const EVIDENCE_PASSWORD = "evidence@123";
-
-function getFileType(url: string): "image" | "pdf" | "other" {
-  const lower = url.toLowerCase();
-  if (/\.(jpg|jpeg|png|gif|webp|svg|bmp)(\?|$)/.test(lower)) return "image";
-  if (/\.pdf(\?|$)/.test(lower)) return "pdf";
-  return "other";
-}
+const EVIDENCE_PASSWORD = "Evidence@2026";
 
 export default function EvidencePage() {
   const { user } = useAuth();
@@ -42,8 +34,6 @@ export default function EvidencePage() {
   const [unlocked, setUnlocked] = useState(false);
   const [password, setPassword] = useState("");
   const [passwordError, setPasswordError] = useState("");
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewTitle, setPreviewTitle] = useState("");
 
   const { data: evidence = [], isLoading } = useQuery({
     queryKey: ["evidence"],
@@ -189,7 +179,17 @@ export default function EvidencePage() {
                   <div className="grid gap-2"><Label className="font-semibold text-muted-foreground">Type Classification</Label><Input value={form.evidence_type} onChange={e => setForm(p => ({ ...p, evidence_type: e.target.value }))} placeholder="e.g. Photo, Digital" className="bg-muted/50" /></div>
                 </div>
                 <div className="grid gap-2"><Label className="font-semibold text-muted-foreground">Detailed Description</Label><AITextarea rows={3} value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))} className="bg-muted/50" context="Legal evidence description" /></div>
-                <div className="grid gap-2"><Label className="font-semibold text-muted-foreground">Secure File Upload</Label><FileUpload value={form.file_url} onChange={url => setForm(p => ({ ...p, file_url: url }))} folder="evidence" /></div>
+                <div className="grid gap-2">
+                  <Label className="font-semibold text-muted-foreground">Secure File Upload (R2 Storage)</Label>
+                  <R2Upload 
+                    onUpload={(url, filename) => setForm(p => ({ ...p, file_url: url }))} 
+                    value={form.file_url}
+                    label={form.file_url ? "Change File" : "Upload Evidence File"}
+                    accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp"
+                    maxSizeMB={50}
+                    folder="evidence"
+                  />
+                </div>
               </div>
               <Button onClick={() => saveMutation.mutate()} disabled={!form.case_id || !form.title || saveMutation.isPending} className="w-full bg-rose-600 hover:bg-rose-700 text-white">
                 {saveMutation.isPending ? "Encrypting & Saving..." : editId ? "Update Record" : "Log to Vault"}
@@ -274,10 +274,8 @@ export default function EvidencePage() {
                   <td className="py-4 px-5 text-right">
                     <div className="flex items-center justify-end gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                       {e.file_url && (
-                        <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-rose-500/10 hover:text-rose-600 transition-colors" title="View Secure File" onClick={async () => {
-                          const url = await getSignedFileUrl(e.file_url);
-                          if (url) { setPreviewUrl(url); setPreviewTitle(e.title); }
-                          else toast.error("Could not unlock file preview");
+                        <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-rose-500/10 hover:text-rose-600 transition-colors" title="View File" onClick={() => {
+                          window.open(e.file_url, '_blank');
                         }}>
                           <Eye className="w-4 h-4" />
                         </Button>
@@ -301,40 +299,6 @@ export default function EvidencePage() {
           </div>
         )}
       </div>
-
-      {/* In-app file preview dialog */}
-      <Dialog open={!!previewUrl} onOpenChange={v => { if (!v) { setPreviewUrl(null); setPreviewTitle(""); } }}>
-        <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col p-0 overflow-hidden">
-          <DialogHeader className="p-4 border-b border-border bg-muted/20">
-            <DialogTitle className="flex items-center gap-2">
-              <Lock className="w-4 h-4 text-rose-500" />
-              {previewTitle || "Secure Evidence Preview"}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="flex-1 min-h-[40vh] overflow-auto p-4 bg-muted/5 flex items-center justify-center">
-            {previewUrl && getFileType(previewUrl) === "image" && (
-              <img src={previewUrl} alt={previewTitle} className="max-w-full max-h-[70vh] rounded-lg shadow-md border border-border" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; setPreviewUrl(previewUrl + "#fallback"); }} />
-            )}
-            {previewUrl && getFileType(previewUrl) === "pdf" && (
-              <iframe src={previewUrl} className="w-full h-[70vh] rounded-lg border border-border shadow-md bg-white" title={previewTitle} />
-            )}
-            {previewUrl && getFileType(previewUrl) === "other" && (
-              <div className="flex flex-col items-center justify-center py-12 gap-6 text-center max-w-sm">
-                <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center">
-                  <ShieldAlert className="w-8 h-8 text-muted-foreground opacity-50" />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-lg text-foreground">Preview Unavailable</h3>
-                  <p className="text-sm text-muted-foreground mt-1">This file type cannot be previewed securely in the browser. Please download it to view.</p>
-                </div>
-                <a href={previewUrl} target="_blank" rel="noreferrer" className="w-full">
-                  <Button className="w-full bg-rose-600 hover:bg-rose-700 text-white"><Download className="w-4 h-4 mr-2" /> Download Secure File</Button>
-                </a>
-              </div>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
