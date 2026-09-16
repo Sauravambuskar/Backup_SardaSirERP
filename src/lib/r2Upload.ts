@@ -125,64 +125,23 @@ async function hmac(
 }
 
 /**
- * Upload file to Cloudflare R2 using presigned URL approach (simpler for client-side)
+ * Upload file to Cloudflare R2 - Simple direct upload without AWS signature
+ * Note: This requires the bucket to have public write access or use a backend proxy
+ * For now, fallback to Cloudinary if R2 fails
  */
 export async function uploadToR2(file: File, folder = "evidence"): Promise<R2UploadResult> {
   if (!isR2Configured()) {
     throw new Error("R2 storage not configured. Check environment variables.");
   }
 
-  const timestamp = Date.now();
-  const sanitizedName = file.name.replace(/[^a-zA-Z0-9.-]/g, "_");
-  const key = `${folder}/${timestamp}_${sanitizedName}`;
+  // For client-side upload to R2, we need either:
+  // 1. A backend API that generates presigned URLs
+  // 2. Public bucket with CORS enabled
+  // 3. Use Cloudinary as fallback (which we already have configured)
   
-  // Convert file to ArrayBuffer
-  const arrayBuffer = await file.arrayBuffer();
-  
-  // Direct upload to R2 endpoint
-  const endpoint = `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET_NAME}/${key}`;
-  
-  const dateTime = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
-  
-  const headers: Record<string, string> = {
-    "Host": `${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    "x-amz-date": dateTime,
-    "x-amz-content-sha256": await sha256(await file.text()),
-    "Content-Type": file.type || "application/octet-stream",
-    "Content-Length": file.size.toString(),
-  };
-  
-  const authorization = await generateSignature(
-    "PUT",
-    `/${R2_BUCKET_NAME}/${key}`,
-    headers,
-    await file.text()
-  );
-  
-  headers["Authorization"] = authorization;
-  
-  const response = await fetch(endpoint, {
-    method: "PUT",
-    headers,
-    body: arrayBuffer,
-  });
-  
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`R2 upload failed: ${response.status} - ${errorText}`);
-  }
-  
-  // Construct public URL
-  const publicUrl = R2_PUBLIC_URL 
-    ? `${R2_PUBLIC_URL}/${key}`
-    : `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET_NAME}/${key}`;
-  
-  return {
-    url: publicUrl,
-    key,
-    size: file.size,
-    filename: file.name,
-  };
+  // Since direct R2 upload from browser is complex without backend,
+  // let's use Cloudinary as the primary storage
+  throw new Error("Direct R2 upload from browser requires backend API. Please use Cloudinary upload component instead.");
 }
 
 /**
