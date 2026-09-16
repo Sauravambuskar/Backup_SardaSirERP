@@ -125,23 +125,55 @@ async function hmac(
 }
 
 /**
- * Upload file to Cloudflare R2 - Simple direct upload without AWS signature
- * Note: This requires the bucket to have public write access or use a backend proxy
- * For now, fallback to Cloudinary if R2 fails
+ * Upload file to Cloudflare R2 via backend API
  */
 export async function uploadToR2(file: File, folder = "evidence"): Promise<R2UploadResult> {
   if (!isR2Configured()) {
     throw new Error("R2 storage not configured. Check environment variables.");
   }
 
-  // For client-side upload to R2, we need either:
-  // 1. A backend API that generates presigned URLs
-  // 2. Public bucket with CORS enabled
-  // 3. Use Cloudinary as fallback (which we already have configured)
-  
-  // Since direct R2 upload from browser is complex without backend,
-  // let's use Cloudinary as the primary storage
-  throw new Error("Direct R2 upload from browser requires backend API. Please use Cloudinary upload component instead.");
+  try {
+    // Step 1: Get presigned URL from backend
+    const response = await fetch('/api/r2-upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: file.name,
+        contentType: file.type || 'application/octet-stream',
+        folder,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to get upload URL');
+    }
+
+    const { uploadUrl, publicUrl, key } = await response.json();
+
+    // Step 2: Upload file to R2 using presigned URL
+    const uploadResponse = await fetch(uploadUrl, {
+      method: 'PUT',
+      body: file,
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+      },
+    });
+
+    if (!uploadResponse.ok) {
+      throw new Error(`Upload failed: ${uploadResponse.status}`);
+    }
+
+    return {
+      url: publicUrl,
+      key,
+      size: file.size,
+      filename: file.name,
+    };
+  } catch (error: any) {
+    console.error('R2 upload error:', error);
+    throw new Error(error.message || 'R2 upload failed');
+  }
 }
 
 /**

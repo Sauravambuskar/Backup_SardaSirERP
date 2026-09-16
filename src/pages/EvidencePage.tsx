@@ -17,7 +17,7 @@ import { toast } from "sonner";
 import { usePagination } from "@/hooks/usePagination";
 import { TablePagination } from "@/components/TablePagination";
 import { DeleteConfirm } from "@/components/DeleteConfirm";
-import { CloudinaryUpload } from "@/components/CloudinaryUpload";
+import { R2Upload } from "@/components/R2Upload";
 import { PageLoader } from "@/components/PageLoader";
 import { exportToCSV } from "@/lib/export";
 
@@ -180,21 +180,15 @@ export default function EvidencePage() {
                 </div>
                 <div className="grid gap-2"><Label className="font-semibold text-muted-foreground">Detailed Description</Label><AITextarea rows={3} value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))} className="bg-muted/50" context="Legal evidence description" /></div>
                 <div className="grid gap-2">
-                  <Label className="font-semibold text-muted-foreground">Secure File Upload</Label>
-                  <CloudinaryUpload 
+                  <Label className="font-semibold text-muted-foreground">Secure File Upload (R2 Storage)</Label>
+                  <R2Upload 
                     onUpload={(url, filename) => setForm(p => ({ ...p, file_url: url }))} 
-                    label={form.file_url ? "Change File" : "Upload Evidence File"}
+                    value={form.file_url}
+                    label={form.file_url ? "Change File" : "Upload Evidence"}
                     accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp"
                     maxSizeMB={50}
+                    folder="evidence"
                   />
-                  {form.file_url && (
-                    <div className="text-xs text-muted-foreground bg-muted/30 p-2 rounded border border-border flex items-center gap-2">
-                      <Eye className="w-3 h-3" />
-                      <a href={form.file_url} target="_blank" rel="noopener noreferrer" className="hover:underline truncate flex-1">
-                        View uploaded file
-                      </a>
-                    </div>
-                  )}
                 </div>
               </div>
               <Button onClick={() => saveMutation.mutate()} disabled={!form.case_id || !form.title || saveMutation.isPending} className="w-full bg-rose-600 hover:bg-rose-700 text-white">
