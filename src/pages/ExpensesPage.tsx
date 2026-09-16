@@ -15,7 +15,7 @@ import { usePagination } from "@/hooks/usePagination";
 import { TablePagination } from "@/components/TablePagination";
 import { DeleteConfirm } from "@/components/DeleteConfirm";
 import { exportToCSV } from "@/lib/export";
-import { FileUpload } from "@/components/FileUpload";
+import { CloudinaryUpload } from "@/components/CloudinaryUpload";
 import { PageLoader } from "@/components/PageLoader";
 
 const emptyForm = { title: "", description: "", amount: "", category: "", case_id: "", expense_date: "", receipt_url: "" };
@@ -130,7 +130,7 @@ export default function ExpensesPage() {
                     </Select>
                   </div>
                 </div>
-                <div className="grid gap-2"><Label className="font-semibold text-muted-foreground">Receipt Attachment</Label><FileUpload value={form.receipt_url} onChange={url => setForm(p => ({ ...p, receipt_url: url }))} folder="receipts" /></div>
+                <div className="grid gap-2"><Label className="font-semibold text-muted-foreground">Receipt Attachment</Label><CloudinaryUpload onUpload={(url) => setForm(p => ({ ...p, receipt_url: url }))} label="Upload Receipt" maxSizeMB={10} /></div>
               </div>
               <Button onClick={() => saveMutation.mutate()} disabled={!form.title || !form.amount || saveMutation.isPending} className="w-full">
                 {saveMutation.isPending ? "Saving..." : editId ? "Update Expense" : "Save Expense"}

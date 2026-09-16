@@ -14,7 +14,7 @@ import { toast } from "sonner";
 import { usePagination } from "@/hooks/usePagination";
 import { TablePagination } from "@/components/TablePagination";
 import { DeleteConfirm } from "@/components/DeleteConfirm";
-import { FileUpload } from "@/components/FileUpload";
+import { CloudinaryUpload } from "@/components/CloudinaryUpload";
 import { PageLoader } from "@/components/PageLoader";
 import { exportToCSV } from "@/lib/export";
 
@@ -220,7 +220,7 @@ export default function DocumentsPage() {
                     </Select>
                   </div>
                 </div>
-                <div className="grid gap-2"><Label className="font-semibold text-muted-foreground">File Attachment</Label><FileUpload value={form.file_url} onChange={url => setForm(p => ({ ...p, file_url: url }))} folder="documents" /></div>
+                <div className="grid gap-2"><Label className="font-semibold text-muted-foreground">File Attachment</Label><CloudinaryUpload onUpload={(url) => setForm(p => ({ ...p, file_url: url }))} label="Upload Document" maxSizeMB={20} /></div>
               </div>
               <Button onClick={() => saveMutation.mutate()} disabled={!form.title || saveMutation.isPending} className="w-full">
                 {saveMutation.isPending ? "Saving..." : editId ? "Update Document" : "Upload Document"}

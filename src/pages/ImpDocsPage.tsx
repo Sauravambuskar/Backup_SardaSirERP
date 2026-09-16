@@ -16,8 +16,7 @@ import mammoth from "mammoth";
 import { toast } from "sonner";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { FileUpload } from "@/components/FileUpload";
-import { getSignedFileUrl } from "@/lib/storage";
+import { CloudinaryUpload } from "@/components/CloudinaryUpload";
 
 const FALLBACK_DOCS = [
   { name: "Adjournment Application", filename: "I am sharing 'Adjournment application' with you.docx", type: "DOCX" },
@@ -229,13 +228,13 @@ const ImpDocsPage = () => {
                 </div>
                 <div className="grid gap-2">
                   <Label>File Upload</Label>
-                  <FileUpload 
-                    value={newDoc.filename} 
-                    onChange={path => {
-                      const ext = path.split(".").pop()?.toUpperCase() || "";
-                      setNewDoc(p => ({ ...p, filename: path, type: ext }));
+                  <CloudinaryUpload 
+                    onUpload={(url, filename) => {
+                      const ext = filename.split(".").pop()?.toUpperCase() || "";
+                      setNewDoc(p => ({ ...p, filename: url, type: ext }));
                     }}
-                    folder="important-docs"
+                    label="Upload Document"
+                    maxSizeMB={20}
                   />
                 </div>
                 <div className="flex items-start gap-2 bg-amber-50 p-3 rounded-xl border border-amber-100 mt-2">
