@@ -16,7 +16,18 @@ This repository contains **the complete SardaSir ERP project** including:
 - ✅ Database migration files
 - ✅ Build outputs (`dist/` folder)
 - ✅ Node modules reference
-- ✅ Nested LawMindDeploy repo (independent git repository inside)
+- ✅ **`lawmind-deploy-main` branch — the ACTUAL LIVE production app** (full `src/`, `api/`, `migrations/`, its own `.env`) pushed here separately because it lives in its own nested git repo
+
+### ⚠️ IMPORTANT — Branch Map (read this first)
+
+This backup repo has **4 branches**, each holding a different piece of the project. They are NOT the same content — pick the right one:
+
+| Branch | Source | What it contains |
+|--------|--------|-------------------|
+| `main` | Parent repo's `lawmind-latest` | Old/legacy `dist/`, `Sardasirproject/`, root `.env`, `.vercel` — **does NOT contain the live app's source code** |
+| `lawmind-latest` | Parent repo | Same as `main` above (identical) |
+| `master` | Parent repo's `master` branch | Legacy branch, split history |
+| **`lawmind-deploy-main`** | **`LawmindDeploy/` (its own independent repo)** | **The real, live, deployed LawMind AI app** — full `src/`, `api/`, `migrations/`, `package.json`, its own `.env`. This is what's running at lawmind-ai.vercel.app. **If you only restore one branch, restore this one.**
 
 ---
 
